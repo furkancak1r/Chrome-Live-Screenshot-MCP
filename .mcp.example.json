@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "chrome-live-screenshot": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "<ABS_PATH>/node_modules/tsx/dist/cli.mjs",
+        "<ABS_PATH>/src/index.ts"
+      ]
+    }
+  }
+}
+

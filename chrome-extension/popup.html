@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Chrome MCP Bridge</title>
+    <style>
+      body { font-family: sans-serif; padding: 16px; width: 280px; }
+      .status { padding: 8px; border-radius: 4px; margin-bottom: 12px; }
+      .connected { background: #d4edda; color: #155724; }
+      .disconnected { background: #f8d7da; color: #721c24; }
+      button { width: 100%; padding: 8px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <div id="status" class="status disconnected">Checking...</div>
+    <button id="openOptions">Open Options</button>
+    <script src="popup.js"></script>
+  </body>
+</html>

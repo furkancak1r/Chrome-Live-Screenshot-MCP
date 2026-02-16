@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome MCP Bridge (Screenshots)",
+  "version": "0.1.0",
+  "description": "Bridge an already-open Chrome session to a local MCP server for tab listing and viewport screenshots.",
+  "permissions": ["tabs", "windows", "storage", "offscreen", "alarms", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws: wss:;"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Chrome MCP Bridge"
+  }
+}
