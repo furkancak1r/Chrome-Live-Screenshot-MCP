@@ -44,6 +44,17 @@ export type CleanupArtifactsParams = {
   maxAgeHours: number;
 };
 
+export type OpenUrlParams = {
+  url: string;
+  match: "prefix" | "exact";
+  reuseIfExists: boolean;
+  openIfMissing: boolean;
+  focusWindow: boolean;
+  activateTab: boolean;
+  waitForComplete: boolean;
+  timeoutMs: number;
+};
+
 function asBool(v: unknown, fallback: boolean): boolean {
   return typeof v === "boolean" ? v : fallback;
 }
@@ -71,7 +82,16 @@ export function parseScreenshotArgs(
 ): ScreenshotParams {
   const a = args ?? {};
 
+  const originalUrl = a.url;
   const url = asStr(a.url, DEFAULT_URL);
+
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch {
+    const displayUrl = originalUrl === undefined || originalUrl === "" ? DEFAULT_URL : originalUrl;
+    throw new Error(`Invalid URL format: "${displayUrl}" is not a valid URL`);
+  }
   const match: "prefix" | "exact" = a.match === "exact" ? "exact" : "prefix";
   const openIfMissing = asBool(a.openIfMissing, true);
   const focusWindow = asBool(a.focusWindow, true);
@@ -108,6 +128,50 @@ export function parseCleanupArtifactsArgs(
   const maxAgeHours = clamp(asNum(a.maxAgeHours, 24), 1, MAX_CLEANUP_HOURS);
   const artifactDir = asOptStr(a.artifactDir);
   return { maxAgeHours, artifactDir };
+}
+
+/**
+ * Parses and validates arguments for the chrome_open_url tool.
+ * @param args - Raw arguments from the MCP request.
+ * @returns Parsed OpenUrlParams with validated and sanitized values.
+ * @throws {Error} If the URL is invalid.
+ */
+export function parseOpenUrlArgs(
+  args: Record<string, unknown> | undefined
+): OpenUrlParams {
+  const a = args ?? {};
+
+  const originalUrl = a.url;
+  const url = asStr(a.url, DEFAULT_URL);
+  try {
+    new URL(url);
+  } catch {
+    const displayUrl = originalUrl === undefined || originalUrl === "" ? DEFAULT_URL : originalUrl;
+    throw new Error(`Invalid URL format: "${displayUrl}" is not a valid URL`);
+  }
+  const matchValue = a.match;
+  if (matchValue !== undefined && matchValue !== "exact" && matchValue !== "prefix") {
+    console.warn(`Invalid match value "${matchValue}" - defaulting to "prefix"`);
+  }
+  const match: "prefix" | "exact" =
+    matchValue === "exact" ? "exact" : matchValue === "prefix" ? "prefix" : "prefix";
+  const reuseIfExists = asBool(a.reuseIfExists, true);
+  const openIfMissing = asBool(a.openIfMissing, true);
+  const focusWindow = asBool(a.focusWindow, true);
+  const activateTab = asBool(a.activateTab, true);
+  const waitForComplete = asBool(a.waitForComplete, true);
+  const timeoutMs = clamp(asNum(a.timeoutMs, 15_000), 1_000, MAX_TIMEOUT_MS);
+
+  return {
+    url,
+    match,
+    reuseIfExists,
+    openIfMissing,
+    focusWindow,
+    activateTab,
+    waitForComplete,
+    timeoutMs,
+  };
 }
 
 export function createMcpServer({ bridge, log }: CreateMcpServerArgs) {
@@ -185,6 +249,48 @@ export function createMcpServer({ bridge, log }: CreateMcpServerArgs) {
                 type: "string",
                 description:
                   "Optional directory for artifact files. Default is platform cache directory.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        {
+          name: "chrome_open_url",
+          description:
+            "Open or focus a URL in the already-open Chrome session via extension. This does not launch a new Chrome process.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "Target URL to open." },
+              match: {
+                type: "string",
+                enum: ["prefix", "exact"],
+                description: "How to match existing tabs before opening.",
+              },
+              reuseIfExists: {
+                type: "boolean",
+                description:
+                  "Reuse an already-open matching tab when available.",
+              },
+              openIfMissing: {
+                type: "boolean",
+                description: "Open a new tab when no match is found.",
+              },
+              focusWindow: {
+                type: "boolean",
+                description: "Focus the window containing the target tab.",
+              },
+              activateTab: {
+                type: "boolean",
+                description: "Activate the target tab.",
+              },
+              waitForComplete: {
+                type: "boolean",
+                description: "Wait for tab load status to be 'complete'.",
+              },
+              timeoutMs: {
+                type: "number",
+                description: "Max wait time for tab load and operations.",
               },
             },
             additionalProperties: false,
@@ -295,6 +401,27 @@ export function createMcpServer({ bridge, log }: CreateMcpServerArgs) {
       };
     }
 
+    if (name === "chrome_open_url") {
+      const p = parseOpenUrlArgs(args);
+      const result = await bridge.call(
+        "openUrl",
+        {
+          url: p.url,
+          match: p.match,
+          reuseIfExists: p.reuseIfExists,
+          openIfMissing: p.openIfMissing,
+          focusWindow: p.focusWindow,
+          activateTab: p.activateTab,
+          waitForComplete: p.waitForComplete,
+          timeoutMs: p.timeoutMs,
+        },
+        p.timeoutMs + 10_000
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+
     if (name === "chrome_artifact_cleanup") {
       const p = parseCleanupArtifactsArgs(args);
       const result = await cleanupScreenshotArtifacts({
@@ -317,4 +444,3 @@ export function createMcpServer({ bridge, log }: CreateMcpServerArgs) {
     },
   };
 }
-

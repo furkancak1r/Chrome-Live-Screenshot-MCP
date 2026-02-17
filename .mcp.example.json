@@ -6,8 +6,11 @@
       "args": [
         "<ABS_PATH>/node_modules/tsx/dist/cli.mjs",
         "<ABS_PATH>/src/index.ts"
-      ]
+      ],
+      "env": {
+        "MCP_CHROME_WS_HOST": "127.0.0.1",
+        "MCP_CHROME_WS_ENDPOINT_HOSTS": "localhost,127.0.0.1"
+      }
     }
   }
 }
-

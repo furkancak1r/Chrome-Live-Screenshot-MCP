@@ -10,25 +10,53 @@ const log = (...args: unknown[]) => {
 async function main() {
   const wsPortEnv = process.env.MCP_CHROME_WS_PORT;
   const runtimeConfig = resolveRuntimeConfig();
-  const wsHost = runtimeConfig.host;
+  const wsHost = runtimeConfig.bindHost;
+  const wsEndpointHosts = runtimeConfig.endpointHosts;
   const wsPort = runtimeConfig.port;
 
   if (wsPortEnv && runtimeConfig.usedDefaultPort) {
     log(`Invalid MCP_CHROME_WS_PORT: ${wsPortEnv}, using default 8766`);
   }
 
-  const bridge = new WsBridge({ host: wsHost, port: wsPort, log });
+  log(
+    `startup runtime platform=${process.platform}/${process.arch} bind=${wsHost} endpointHost=${wsEndpointHosts[0]} portRange=${runtimeConfig.portRangeStart}-${runtimeConfig.portRangeEndExclusive - 1}`
+  );
 
-  try {
-    await bridge.start();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("EADDRINUSE")) {
-      throw new Error(
-        `WS port ${wsPort} is already in use. Stop the previous MCP bridge process and start again.`
+  const bridge = new WsBridge({ host: wsHost, endpointHost: wsEndpointHosts[0], port: wsPort, log });
+  const basePort = runtimeConfig.portRangeStart;
+  const maxRetries = Math.max(1, runtimeConfig.portRangeEndExclusive - runtimeConfig.portRangeStart);
+  let currentPort = basePort;
+  let started = false;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      bridge.setPort(currentPort);
+      await bridge.start();
+      started = true;
+      break;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const netErr = err as {
+        code?: string;
+        errno?: number | string;
+        syscall?: string;
+        address?: string;
+        port?: number;
+      };
+      log(
+        `bind attempt failed host=${wsHost} port=${currentPort} code=${netErr?.code ?? "n/a"} errno=${netErr?.errno ?? "n/a"} syscall=${netErr?.syscall ?? "n/a"} address=${netErr?.address ?? "n/a"} errPort=${netErr?.port ?? "n/a"} message=${message}`
       );
+      if (message.includes("EADDRINUSE")) {
+        currentPort = basePort + attempt + 1;
+        log(`Port ${basePort + attempt} in use on ${wsHost}, trying ${currentPort}...`);
+        continue;
+      }
+      throw err;
     }
-    throw err;
+  }
+
+  if (!started) {
+    throw new Error(`Could not find available port after ${maxRetries} attempts.`);
   }
 
   let shuttingDown = false;
@@ -46,7 +74,10 @@ async function main() {
   process.stdin.on("end", () => void shutdown("stdin end"));
   process.stdin.on("close", () => void shutdown("stdin close"));
 
-  log(`WS listening on ws://${wsHost}:${wsPort}`);
+  const endpointSummary = wsEndpointHosts
+    .map((host) => `ws://${host}:${currentPort}`)
+    .join(", ");
+  log(`WS listening bind=${wsHost}:${currentPort} endpoints=${endpointSummary}`);
   log("Secret validation: disabled (auto-connect mode).");
 
   const server = createMcpServer({ bridge, log });

@@ -17,6 +17,13 @@ npm test
 2. WebSocket bridge (`src/ws-bridge.ts`)
 3. Extension (`chrome-extension/`)
 
+## Tools
+
+- `chrome_list_tabs`
+- `chrome_open_url` (opens/focuses URL in already-open Chrome session; no new Chrome process launch)
+- `chrome_screenshot`
+- `chrome_artifact_cleanup`
+
 ## Screenshot Return Modes
 
 `chrome_screenshot` supports:
@@ -51,4 +58,3 @@ When host is unset:
 
 - WSL defaults to `0.0.0.0`
 - non-WSL defaults to `127.0.0.1`
-

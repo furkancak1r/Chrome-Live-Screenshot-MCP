@@ -49,7 +49,7 @@ function setStatus(text, kind) {
 async function load() {
   const { wsUrl } = await pStorageGet(["wsUrl"]);
   els.wsUrl.value = typeof wsUrl === "string" && wsUrl.length > 0 ? wsUrl : DEFAULT_WS_URL;
-  setStatus("Loaded. Default: ws://localhost:8766", "");
+  setStatus("Loaded. WS URL is a seed/priority hint; extension still auto-scans local MCP endpoints.", "");
 }
 
 async function save() {

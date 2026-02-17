@@ -5,9 +5,12 @@
   "type": "module",
   "description": "MCP server + Chrome extension bridge to capture screenshots from an already-open Chrome session.",
   "scripts": {
+    "predev": "node scripts/ensure-esbuild-platform.mjs",
     "dev": "tsx src/index.ts",
+    "prebuild": "node scripts/ensure-esbuild-platform.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "pretest": "node scripts/ensure-esbuild-platform.mjs",
     "test": "node --import tsx --test test/*.test.js"
   },
   "dependencies": {

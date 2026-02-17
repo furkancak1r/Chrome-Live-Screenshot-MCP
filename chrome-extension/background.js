@@ -1,13 +1,32 @@
 /* global chrome */
 
 const DEFAULT_WS_URL = "ws://localhost:8766";
+const DEFAULT_URL = "http://localhost:5173/";
 const bridgeStatus = {
   connected: false,
   wsUrl: DEFAULT_WS_URL,
+  connectedEndpoints: [],
+  disconnectedEndpoints: [],
   lastError: "Waiting for offscreen connection.",
   lastChangeAt: null
 };
 let alarmListenerRegistered = false;
+let commandLock = Promise.resolve();
+
+async function withCommandLock(fn) {
+  const prev = commandLock;
+  let release;
+  commandLock = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
 
 function updateBridgeStatus(next) {
   if (!next || typeof next !== "object") return;
@@ -16,6 +35,21 @@ function updateBridgeStatus(next) {
   }
   if (typeof next.wsUrl === "string" && next.wsUrl.length > 0) {
     bridgeStatus.wsUrl = next.wsUrl;
+  }
+  if (Array.isArray(next.connectedEndpoints)) {
+    bridgeStatus.connectedEndpoints = next.connectedEndpoints
+      .filter((value) => typeof value === "string" && value.length > 0);
+  }
+  if (Array.isArray(next.disconnectedEndpoints)) {
+    bridgeStatus.disconnectedEndpoints = next.disconnectedEndpoints
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => ({
+        wsUrl: typeof entry.wsUrl === "string" ? entry.wsUrl : "",
+        lastError: typeof entry.lastError === "string" || entry.lastError === null
+          ? entry.lastError
+          : null
+      }))
+      .filter((entry) => entry.wsUrl.length > 0);
   }
   if (typeof next.lastError === "string" || next.lastError === null) {
     bridgeStatus.lastError = next.lastError;
@@ -258,7 +292,7 @@ function normalizeUrl(url) {
     }
     return u.toString();
   } catch {
-    return url;
+    throw new Error(`Invalid URL format: ${url}`);
   }
 }
 
@@ -291,40 +325,112 @@ function pickBestTab(candidates, lastFocusedWindowId) {
   return candidates[0]?.tab ?? null;
 }
 
+/**
+ * Resolves a tab for a given URL, either by finding an existing matching tab or creating a new one.
+ * @param {Object} params - Parameters for resolving the tab.
+ * @param {string} params.url - The URL to match or open.
+ * @param {"prefix"|"exact"} params.match - How to match the URL against existing tabs.
+ * @param {boolean} [params.reuseIfExists=true] - Whether to reuse an existing matching tab.
+ * @param {boolean} [params.openIfMissing=true] - Whether to open a new tab if no match is found.
+ * @param {boolean} [params.waitForComplete=true] - Whether to wait for the tab to finish loading.
+ * @param {number} [params.timeoutMs=15000] - Max time to wait for tab load.
+ * @returns {Promise<{tab?: chrome.tabs.Tab, action?: string, error?: {message: string, reason: string}}>}
+ *   Resolves with tab and action, or error if unable to resolve.
+ */
+async function resolveTabForUrl({
+  url,
+  match,
+  reuseIfExists,
+  openIfMissing,
+  waitForComplete = true,
+  timeoutMs
+}) {
+  // Validate URL before attempting to create/lookup tab
+  if (!url || typeof url !== "string" || url.trim().length === 0) {
+    return { error: { message: "Invalid URL: must be a non-empty string", reason: "invalid_url" } };
+  }
+
+  let targetNorm;
+  try {
+    targetNorm = normalizeUrl(url);
+  } catch {
+    return { error: { message: `Invalid URL format: ${url}`, reason: "invalid_url_format" } };
+  }
+
+  if (reuseIfExists) {
+    const tabs = await pTabsQuery({});
+    const candidates = [];
+    for (const tab of tabs) {
+      if (!tab?.id || !tab?.url) continue;
+      // Skip non-http(s) URLs to prevent normalizeUrl from throwing
+      if (!tab.url.startsWith('http://') && !tab.url.startsWith('https://')) {
+        continue;
+      }
+      const tabNorm = normalizeUrl(tab.url);
+      const ok =
+        match === "exact" ? tabNorm === targetNorm : tabNorm.startsWith(targetNorm);
+      if (ok) candidates.push({ tab, tabNorm });
+    }
+
+    const lastFocusedWindowId = await getLastFocusedWindowId();
+    const chosen = pickBestTab(candidates, lastFocusedWindowId);
+    if (chosen) {
+      return { tab: chosen, action: "reused_existing_tab" };
+    }
+  }
+
+  if (!openIfMissing) {
+    return { error: { message: "No matching tab found and openIfMissing is false", reason: "open_if_missing_disabled" } };
+  }
+
+  const created = await pTabsCreate({ url });
+  if (!created || !created.id) return { error: { message: "Failed to create new tab", reason: "tab_creation_failed" } };
+
+  if (waitForComplete) {
+    await waitForTabComplete(created.id, timeoutMs);
+    const refreshed = await pTabsGet(created.id);
+    return { tab: refreshed ?? created, action: "opened_new_tab" };
+  }
+  return { tab: created, action: "opened_new_tab" };
+}
+
 async function findOrOpenTab({
   url,
   match,
   openIfMissing,
   timeoutMs
 }) {
-  const targetNorm = normalizeUrl(url);
-  const tabs = await pTabsQuery({});
-
-  const candidates = [];
-  for (const tab of tabs) {
-    if (!tab?.id || !tab?.url) continue;
-    const tabNorm = normalizeUrl(tab.url);
-    const ok =
-      match === "exact" ? tabNorm === targetNorm : tabNorm.startsWith(targetNorm);
-    if (ok) candidates.push({ tab, tabNorm });
+  const result = await resolveTabForUrl({
+    url,
+    match,
+    reuseIfExists: true,
+    openIfMissing,
+    timeoutMs
+  });
+  // Handle error case - re-throw with context
+  // Note: The 'reason' property is a custom extension property used for programmatic error categorization.
+  // It is not part of the standard Error interface but is added here to help callers distinguish between
+  // different error types (e.g., invalid_url, tab_creation_failed, etc.).
+  if (result?.error) {
+    const err = new Error(result.error.message);
+    err.reason = result.error.reason;
+    throw err;
   }
-
-  const lastFocusedWindowId = await getLastFocusedWindowId();
-  const chosen = pickBestTab(candidates, lastFocusedWindowId);
-  if (chosen) return chosen;
-
-  if (!openIfMissing) return null;
-
-  const created = await pTabsCreate({ url });
-  if (!created?.id) return null;
-
-  await waitForTabComplete(created.id, timeoutMs);
-  const refreshed = await pTabsGet(created.id);
-  return refreshed;
+  return result?.tab ?? null;
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
   return new Promise((resolve, reject) => {
+    let resolved = false;
+
+    const resolveOnce = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(t);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve();
+    };
+
     const t = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(onUpdated);
       reject(new Error("Timeout waiting for tab to complete."));
@@ -333,9 +439,7 @@ function waitForTabComplete(tabId, timeoutMs) {
     const onUpdated = (updatedTabId, changeInfo) => {
       if (updatedTabId !== tabId) return;
       if (changeInfo.status === "complete") {
-        clearTimeout(t);
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        resolve();
+        resolveOnce();
       }
     };
 
@@ -344,9 +448,7 @@ function waitForTabComplete(tabId, timeoutMs) {
     pTabsGet(tabId)
       .then((tab) => {
         if (tab?.status === "complete") {
-          clearTimeout(t);
-          chrome.tabs.onUpdated.removeListener(onUpdated);
-          resolve();
+          resolveOnce();
         }
       })
       .catch(() => {
@@ -356,64 +458,159 @@ function waitForTabComplete(tabId, timeoutMs) {
 }
 
 async function captureScreenshot(params) {
-  const {
-    url,
-    match = "prefix",
-    openIfMissing = true,
-    focusWindow = true,
-    activateTab = true,
-    waitForComplete = true,
-    timeoutMs = 15000,
-    extraWaitMs = 250,
-    format = "png",
-    jpegQuality = 80
-  } = params || {};
+  return await withCommandLock(async () => {
+    const {
+      url,
+      match = "prefix",
+      openIfMissing = true,
+      focusWindow = true,
+      activateTab = true,
+      waitForComplete = true,
+      timeoutMs = 15000,
+      extraWaitMs = 250,
+      format = "png",
+      jpegQuality = 80
+    } = params || {};
 
-  const tab = await findOrOpenTab({
-    url,
-    match,
-    openIfMissing,
-    timeoutMs
-  });
+    const tab = await findOrOpenTab({
+      url,
+      match,
+      openIfMissing,
+      timeoutMs
+    });
 
-  if (!tab?.id || !tab?.windowId) {
-    throw new Error("No matching tab found and could not open a new one.");
-  }
-
-  if (focusWindow) {
-    try {
-      await pWindowsUpdate(tab.windowId, { focused: true });
-    } catch {
-      // ignore
+    if (!tab?.id || !tab?.windowId) {
+      throw new Error("No matching tab found and could not open a new one.");
     }
-  }
 
-  if (activateTab) {
-    try {
-      await pTabsUpdate(tab.id, { active: true });
-    } catch {
-      // ignore
+    if (focusWindow) {
+      try {
+        await pWindowsUpdate(tab.windowId, { focused: true });
+      } catch (err) {
+        console.warn("Failed to focus window:", err?.message);
+      }
     }
-  }
 
-  if (waitForComplete) {
-    await waitForTabComplete(tab.id, timeoutMs);
-  }
+    if (activateTab) {
+      try {
+        await pTabsUpdate(tab.id, { active: true });
+      } catch (err) {
+        console.warn("Failed to activate tab:", err?.message);
+      }
+    }
 
-  if (extraWaitMs > 0) {
-    await new Promise((r) => setTimeout(r, extraWaitMs));
-  }
+    if (waitForComplete) {
+      await waitForTabComplete(tab.id, timeoutMs);
+    }
 
-  const dataUrl = await pCaptureVisibleTab(tab.windowId, {
-    format,
-    quality: format === "jpeg" ? Math.max(0, Math.min(100, jpegQuality)) : undefined
+    if (extraWaitMs > 0) {
+      await new Promise((r) => setTimeout(r, extraWaitMs));
+    }
+
+    const dataUrl = await pCaptureVisibleTab(tab.windowId, {
+      format,
+      quality: format === "jpeg" ? Math.max(0, Math.min(100, jpegQuality)) : undefined
+    });
+
+    const comma = dataUrl.indexOf(",");
+    const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+    const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
+
+    return { mimeType, data: base64 };
   });
+}
 
-  const comma = dataUrl.indexOf(",");
-  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-  const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
+/**
+ * Opens a URL in Chrome, either by focusing an existing tab or creating a new one.
+ * @param {Object} params - Parameters for opening the URL.
+ * @param {string} params.url - The URL to open.
+ * @param {"prefix"|"exact"} [params.match="prefix"] - How to match existing tabs.
+ * @param {boolean} [params.reuseIfExists=true] - Whether to reuse an existing matching tab.
+ * @param {boolean} [params.openIfMissing=true] - Whether to open a new tab if no match is found.
+ * @param {boolean} [params.focusWindow=true] - Whether to focus the window containing the tab.
+ * @param {boolean} [params.activateTab=true] - Whether to activate the tab.
+ * @param {boolean} [params.waitForComplete=true] - Whether to wait for the tab to finish loading.
+ * @param {number} [params.timeoutMs=15000] - Max time to wait for tab load.
+ * @returns {Promise<{success: boolean, action: string, tabId: number, windowId: number, title: string, url: string, status: string|null}>}
+ *   Resolves with success details including the tab info.
+ * @throws {Error} If the URL cannot be resolved or tab operations fail.
+ */
+async function openUrl(params) {
+  return await withCommandLock(async () => {
+    const {
+      url,
+      match = "prefix",
+      reuseIfExists = true,
+      openIfMissing = true,
+      focusWindow = true,
+      activateTab = true,
+      waitForComplete = true,
+      timeoutMs = 15000
+    } = params || {};
 
-  return { mimeType, data: base64 };
+    const resolved = await resolveTabForUrl({
+      url,
+      match,
+      reuseIfExists,
+      openIfMissing,
+      waitForComplete,
+      timeoutMs
+    });
+
+    // Handle error case
+    if (resolved?.error) {
+      const err = new Error(resolved.error.message);
+      err.reason = resolved.error.reason;
+      throw err;
+    }
+
+    const tab = resolved?.tab;
+    if (!tab) {
+      throw new Error("Failed to resolve tab: unexpected response from resolveTabForUrl");
+    }
+    if (!tab.id || !tab.windowId) {
+      throw new Error("No matching tab found and could not open a new one.");
+    }
+
+    if (focusWindow) {
+      try {
+        await pWindowsUpdate(tab.windowId, { focused: true });
+      } catch (err) {
+        console.warn("Failed to focus window:", err?.message);
+      }
+    }
+
+    if (activateTab) {
+      try {
+        await pTabsUpdate(tab.id, { active: true });
+      } catch (err) {
+        console.warn("Failed to activate tab:", err?.message);
+      }
+    }
+
+    // New tabs are waited in resolveTabForUrl when waitForComplete=true.
+    // Wait here only for reused tabs.
+    if (waitForComplete && resolved.action === "reused_existing_tab") {
+      await waitForTabComplete(tab.id, timeoutMs);
+    }
+
+    let refreshedTab = tab;
+    try {
+      refreshedTab = (await pTabsGet(tab.id)) ?? tab;
+    } catch (err) {
+      console.warn("Failed to refresh tab:", err?.message);
+    }
+
+    return {
+      success: true,
+      action: resolved.action,
+      tabId: refreshedTab.id,
+      windowId: refreshedTab.windowId,
+      title: refreshedTab.title ?? "",
+      url: refreshedTab.url ?? url,
+      status: refreshedTab.status ?? null
+    };
+  });
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -470,8 +667,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
 
     if (cmd === "screenshot") {
-      const url = (params && typeof params.url === "string" && params.url) || "http://localhost:5173/";
+      const url = (params && typeof params.url === "string" && params.url) || DEFAULT_URL;
       return await captureScreenshot({ ...params, url });
+    }
+
+    if (cmd === "openUrl") {
+      const url = (params && typeof params.url === "string" && params.url) || DEFAULT_URL;
+      return await openUrl({ ...params, url });
     }
 
     throw new Error(`Unknown cmd: ${cmd}`);
@@ -486,7 +688,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         type: "res",
         id,
         ok: false,
-        error: { message: err?.message ?? String(err) }
+        error: { message: err?.message ?? String(err), reason: err?.reason }
       });
     });
 

@@ -17,8 +17,28 @@ test("runtime-config: explicit host env wins", () => {
   });
 
   assert.equal(cfg.host, "10.11.12.13");
+  assert.equal(cfg.endpointHost, "10.11.12.13");
+  assert.equal(cfg.endpointHosts[0], "10.11.12.13");
   assert.equal(cfg.port, 7001);
   assert.equal(cfg.usedDefaultPort, false);
+});
+
+test("runtime-config: endpoint host list supports CSV and preserves order", () => {
+  const cfg = resolveRuntimeConfig({
+    env: {
+      MCP_CHROME_WS_ENDPOINT_HOSTS: "wsl.localhost,localhost,127.0.0.1",
+      MCP_CHROME_WS_ENDPOINT_HOST: "localhost",
+    },
+    platform: "linux",
+    release: "6.8.0-generic",
+  });
+
+  assert.deepEqual(cfg.endpointHosts.slice(0, 3), [
+    "wsl.localhost",
+    "localhost",
+    "127.0.0.1",
+  ]);
+  assert.equal(cfg.endpointHost, "wsl.localhost");
 });
 
 test("runtime-config: WSL detected by WSL_DISTRO_NAME", () => {
@@ -73,6 +93,12 @@ test("runtime-config: default host is 0.0.0.0 in WSL", () => {
   });
 
   assert.equal(cfg.host, "0.0.0.0");
+  assert.equal(cfg.endpointHost, "wsl.localhost");
+  assert.deepEqual(cfg.endpointHosts.slice(0, 3), [
+    "wsl.localhost",
+    "localhost",
+    "127.0.0.1",
+  ]);
 });
 
 test("runtime-config: default host is 127.0.0.1 outside WSL", () => {
@@ -83,6 +109,7 @@ test("runtime-config: default host is 127.0.0.1 outside WSL", () => {
   });
 
   assert.equal(cfg.host, "127.0.0.1");
+  assert.deepEqual(cfg.endpointHosts.slice(0, 2), ["localhost", "127.0.0.1"]);
 });
 
 test("runtime-config: missing port uses default", () => {
@@ -142,4 +169,3 @@ test("runtime-config: boundary ports are accepted", () => {
   assert.equal(cfgMax.port, 65535);
   assert.equal(cfgMax.usedDefaultPort, false);
 });
-
